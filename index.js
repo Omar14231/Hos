@@ -17,50 +17,58 @@ const client = new Client({
 // ===================== الإعدادات =====================
 const TOKEN = process.env.DISCORD_TOKEN;
 
-const ROLE_MUKHTAR   = '1474552028545028292';
-const ROLE_CARSELLER = '1514665270269055116';
-const ROLE_GAS       = '1514666531647131841';
-const ROLE_BUILDER   = '1514672754123739186';
+const ROLE_MUKHTAR   = '1474552028545028292'; // مختار
+const ROLE_CARSELLER = '1514665270269055116'; // بائع سيارات
+const ROLE_GAS       = '1514666531647131841'; // محطة بنزين
+const ROLE_BUILDER   = '1514672754123739186'; // باني رومات
 
-let CAT_HOMES_ID = null;
-let CAT_CITY_ID  = null;
-let CAT_SHOPS_ID = null;
-let CAT_GANG_ID  = null;
+// رتبة عالية تقدر تسوي مدن جديدة وتستخدم ق/ف
+// حط ID رتبتك أنت هنا
+const ROLE_HIGH      = '1474553962597191804'; // غيّر هذا لـ ID رتبتك العالية
 
 // ===================== الذاكرة =====================
-const homes        = new Map(); // userId -> channelId
-const carOwners    = new Set(); // userId اشترى سيارة
-const fuelMap      = new Map(); // userId -> { count, max }
-const dirtyHomes   = new Map(); // channelId -> timeout
+const homes         = new Map(); // userId -> channelId
+const carOwners     = new Set(); // userId اشترى سيارة
+const fuelMap       = new Map(); // userId -> { count, max }
+const dirtyHomes    = new Map(); // channelId -> timeout
+const cityCategories = new Map(); // اسم المدينة -> categoryId
+// رومات المدينة الأصلية اللي تعرض بس (بدون كتابة)
+const readOnlyRooms = new Set(); // channelId
 
-// ===================== إنشاء الكاتيغوريز =====================
-async function ensureCategories(guild) {
+// ===================== إنشاء الكاتيغوريز الأساسية =====================
+let CAT_HOMES_ID = null;
+let CAT_SHOPS_ID = null;
+
+async function ensureBaseCategories(guild) {
   if (!CAT_HOMES_ID) {
     let c = guild.channels.cache.find(x => x.type === ChannelType.GuildCategory && x.name.includes('البيوت'));
     if (!c) c = await guild.channels.create({ name: '🏠 البيوت', type: ChannelType.GuildCategory });
     CAT_HOMES_ID = c.id;
-  }
-  if (!CAT_CITY_ID) {
-    let c = guild.channels.cache.find(x => x.type === ChannelType.GuildCategory && x.name.includes('المدينة') && !x.name.includes('العصابة'));
-    if (!c) c = await guild.channels.create({ name: '🌆 المدينة', type: ChannelType.GuildCategory });
-    CAT_CITY_ID = c.id;
   }
   if (!CAT_SHOPS_ID) {
     let c = guild.channels.cache.find(x => x.type === ChannelType.GuildCategory && x.name.includes('المحلات'));
     if (!c) c = await guild.channels.create({ name: '🏪 المحلات', type: ChannelType.GuildCategory });
     CAT_SHOPS_ID = c.id;
   }
-  if (!CAT_GANG_ID) {
-    let c = guild.channels.cache.find(x => x.type === ChannelType.GuildCategory && x.name.includes('العصابة'));
-    if (!c) c = await guild.channels.create({ name: '🕶️ مدينة العصابة', type: ChannelType.GuildCategory });
-    CAT_GANG_ID = c.id;
-  }
 }
 
-// ===================== إنشاء رومات المدينة والعصابة (مخفية) =====================
-async function ensureCityRooms(guild) {
-  await ensureCategories(guild);
+// ===================== إنشاء مدينة جديدة =====================
+async function createCity(guild, cityName) {
+  if (cityCategories.has(cityName)) return cityCategories.get(cityName);
 
+  const cat = await guild.channels.create({
+    name: `🌆 مدينة ${cityName}`,
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: [
+      { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }
+    ]
+  });
+  cityCategories.set(cityName, cat.id);
+  return cat.id;
+}
+
+// ===================== رومات المدينة الرئيسية (مخفية + قراءة فقط للعضو) =====================
+async function ensureCityRooms(guild, catId, readOnly = true) {
   const cityRooms = [
     '✧┇💭┇✧・شات',
     '✧┇🎟┇✧・الدعم・الفني',
@@ -71,27 +79,23 @@ async function ensureCityRooms(guild) {
   ];
 
   for (const name of cityRooms) {
-    const exists = guild.channels.cache.find(c => c.name === name && c.parentId === CAT_CITY_ID);
+    const exists = guild.channels.cache.find(c => c.name === name && c.parentId === catId);
     if (!exists) {
-      await guild.channels.create({
-        name, type: ChannelType.GuildText, parent: CAT_CITY_ID,
-        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }]
+      const ch = await guild.channels.create({
+        name, type: ChannelType.GuildText, parent: catId,
+        permissionOverwrites: [
+          { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }
+        ]
       });
-    }
-  }
-
-  const gangRooms = [
-    '✧┇🕶┇✧・شات',
-    '✧┇🏚┇✧・مكان・مجهور',
-  ];
-
-  for (const name of gangRooms) {
-    const exists = guild.channels.cache.find(c => c.name === name && c.parentId === CAT_GANG_ID);
-    if (!exists) {
-      await guild.channels.create({
-        name, type: ChannelType.GuildText, parent: CAT_GANG_ID,
-        permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }]
-      });
+      // روم شات يسمح بالكتابة، باقيهم قراءة فقط
+      if (name.includes('شات')) {
+        // شات عادي
+      } else {
+        readOnlyRooms.add(ch.id);
+      }
+    } else {
+      // ضيف للـ set لو كان موجود
+      if (!exists.name.includes('شات')) readOnlyRooms.add(exists.id);
     }
   }
 }
@@ -100,7 +104,7 @@ async function ensureCityRooms(guild) {
 async function createHome(member) {
   if (homes.has(member.id)) return;
   const guild = member.guild;
-  await ensureCategories(guild);
+  await ensureBaseCategories(guild);
 
   const channel = await guild.channels.create({
     name: `✧┇🏡┇✧・بيت・${member.user.username}`,
@@ -114,12 +118,12 @@ async function createHome(member) {
 
   homes.set(member.id, channel.id);
   await channel.send(
-    `> مرحباً بك يا <@${member.id}> 👋\n> إذا كنت تود أن تكتشف المدينة يرجا كتب أمر **!انتقال**`
+    `> مرحباً بك يا <@${member.id}> 👋\n> إذا كنت تود أن تكتشف المدينة يرجا كتب أمر **!انتقال**\n> اكتب **!مسح** لمسح رسائل بيتك`
   );
   startDirtyTimer(channel);
 }
 
-// ===================== مؤقت البيت الوسخ (ساعة بدون كلام) =====================
+// ===================== مؤقت الوسخ =====================
 function startDirtyTimer(channel) {
   if (dirtyHomes.has(channel.id)) clearTimeout(dirtyHomes.get(channel.id));
   const t = setTimeout(async () => {
@@ -139,8 +143,7 @@ function startDirtyTimer(channel) {
 async function hideHome(guild, userId) {
   const ch = guild.channels.cache.get(homes.get(userId));
   if (!ch) return;
-  await ch.permissionOverwrites.edit(guild.roles.everyone.id, { ViewChannel: false });
-  await ch.permissionOverwrites.edit(userId, { ViewChannel: false });
+  await ch.permissionOverwrites.edit(userId, { ViewChannel: false }).catch(() => {});
 }
 
 async function showHome(guild, userId) {
@@ -150,18 +153,55 @@ async function showHome(guild, userId) {
   await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: true });
 }
 
-// ===================== إخفاء / إظهار المدينة للعضو =====================
+// ===================== إظهار المدينة للعضو =====================
 async function showCity(guild, userId, catId) {
   const rooms = guild.channels.cache.filter(c => c.parentId === catId && c.type === ChannelType.GuildText);
   for (const [, ch] of rooms) {
-    await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: true });
+    // روم قراءة فقط = يشوف بس ما يكتب
+    if (readOnlyRooms.has(ch.id)) {
+      await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: false });
+    } else {
+      await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: true });
+    }
   }
+  // المحلات تظهر أيضاً لمن في المدينة
+  await showShops(guild, userId);
 }
 
 async function hideCity(guild, userId, catId) {
   const rooms = guild.channels.cache.filter(c => c.parentId === catId && c.type === ChannelType.GuildText);
   for (const [, ch] of rooms) {
     await ch.permissionOverwrites.edit(userId, { ViewChannel: false }).catch(() => {});
+  }
+  // إخفاء المحلات عند مغادرة المدينة
+  await hideShops(guild, userId);
+}
+
+// ===================== إظهار / إخفاء المحلات =====================
+async function showShops(guild, userId) {
+  const shops = guild.channels.cache.filter(c => c.parentId === CAT_SHOPS_ID && c.type === ChannelType.GuildText);
+  for (const [, ch] of shops) {
+    // يشوف فقط، ما يكتب إلا صاحب المحل
+    const ownerOverwrite = ch.permissionOverwrites.cache.find(o =>
+      o.allow.has(PermissionFlagsBits.ManageChannels)
+    );
+    if (ownerOverwrite && ownerOverwrite.id === userId) {
+      await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: true });
+    } else {
+      await ch.permissionOverwrites.edit(userId, { ViewChannel: true, SendMessages: false });
+    }
+  }
+}
+
+async function hideShops(guild, userId) {
+  const shops = guild.channels.cache.filter(c => c.parentId === CAT_SHOPS_ID && c.type === ChannelType.GuildText);
+  for (const [, ch] of shops) {
+    const ownerOverwrite = ch.permissionOverwrites.cache.find(o =>
+      o.allow.has(PermissionFlagsBits.ManageChannels) && o.id === userId
+    );
+    if (!ownerOverwrite) {
+      await ch.permissionOverwrites.edit(userId, { ViewChannel: false }).catch(() => {});
+    }
   }
 }
 
@@ -173,8 +213,8 @@ function getDelay(userId) {
   return 10_000;
 }
 
-// ===================== الانتقال للمدينة (مع نظام البنزين) =====================
-async function transitToCity(message, userId, targetCatId) {
+// ===================== الانتقال للمدينة =====================
+async function transitToCity(message, userId, catId) {
   const guild = message.guild;
   const member = await guild.members.fetch(userId).catch(() => null);
   if (!member) return;
@@ -184,28 +224,22 @@ async function transitToCity(message, userId, targetCatId) {
   if (carOwners.has(userId)) {
     const fuel = fuelMap.get(userId) || { count: 0, max: 25 };
     if (fuel.count >= fuel.max) {
+      await message.reply('> ⚠️ سيارتك بدون بنزين! انتقالك دقيقة ونص.\n> روح لمحطة البنزين واطلب منهم `!عب @منشنك`');
       delay = 90_000;
-      await message.reply('> ⚠️ سيارتك بدون بنزين! انتقالك صار دقيقة ونص.\n> روح لمحطة البنزين.');
     } else {
       delay = 10_000;
       fuel.count++;
       fuelMap.set(userId, fuel);
       const remaining = fuel.max - fuel.count;
-      if (remaining === 5) {
-        await member.send('> ⚠️ تحذير! بقي لك **5** انتقالات فقط، روح عبّ بنزين.').catch(() => {});
-      }
-      if (remaining === 0) {
-        await member.send('> 🚨 البنزين خلص! انتقالاتك الجاية رح تاخذ دقيقة ونص.').catch(() => {});
-      }
+      if (remaining === 5) await member.send('> ⚠️ بقي لك **5** انتقالات فقط، عبّ بنزين!').catch(() => {});
+      if (remaining === 0) await member.send('> 🚨 البنزين خلص! التنقل صار دقيقة ونص حتى تعبئ.').catch(() => {});
     }
   }
 
   await message.reply(`> ⏳ جاري نقلك... انتظر **${Math.round(delay / 1000)} ثانية**`);
-
   setTimeout(async () => {
     await hideHome(guild, userId).catch(() => {});
-    await showCity(guild, userId, targetCatId);
-    await member.send('> ✅ وصلت! استخدم **!بيت** للعودة.').catch(() => {});
+    await showCity(guild, userId, catId);
   }, delay);
 }
 
@@ -213,17 +247,17 @@ async function transitToCity(message, userId, targetCatId) {
 async function transitToHome(message, userId) {
   const guild = message.guild;
   const delay = getDelay(userId);
-
   await message.reply(`> ⏳ جاري العودة للبيت... انتظر **${Math.round(delay / 1000)} ثانية**`);
-
   setTimeout(async () => {
-    await hideCity(guild, userId, CAT_CITY_ID).catch(() => {});
-    await hideCity(guild, userId, CAT_GANG_ID).catch(() => {});
+    // إخفاء كل المدن
+    for (const [, catId] of cityCategories) {
+      await hideCity(guild, userId, catId).catch(() => {});
+    }
     await showHome(guild, userId);
   }, delay);
 }
 
-// ===================== عضو جديد يدخل =====================
+// ===================== عضو جديد =====================
 client.on('guildMemberAdd', async (member) => {
   await createHome(member);
 });
@@ -236,8 +270,21 @@ client.on('messageCreate', async (message) => {
   const args = content.trim().split(/\s+/);
   const cmd = args[0];
 
-  // ريسيت مؤقت الوسخ لو الرسالة في بيت الشخص
+  // ريسيت مؤقت الوسخ
   if (homes.get(userId) === channel.id) startDirtyTimer(channel);
+
+  // ==================== ق / ف (قفل / فتح روم) ====================
+  if (content.trim() === 'ق' || content.trim() === 'ف') {
+    if (!member.roles.cache.has(ROLE_HIGH) && !member.permissions.has(PermissionFlagsBits.Administrator)) return;
+    await message.delete().catch(() => {});
+    const isLock = content.trim() === 'ق';
+    await channel.permissionOverwrites.edit(guild.roles.everyone.id, {
+      SendMessages: isLock ? false : true
+    });
+    const notice = await channel.send(isLock ? '> 🔒 الروم مقفول.' : '> 🔓 الروم مفتوح.');
+    setTimeout(() => notice.delete().catch(() => {}), 5000);
+    return;
+  }
 
   // ==================== !أبدأ٧٧ ====================
   if (content.trim() === '!أبدأ٧٧') {
@@ -245,7 +292,10 @@ client.on('messageCreate', async (message) => {
       return message.reply('> ❌ هذا الأمر للأدمن فقط.');
     }
     const status = await message.reply('> ⏳ جاري بناء السيرفر...');
-    await ensureCityRooms(guild);
+    await ensureBaseCategories(guild);
+    // مدينة رئيسية افتراضية
+    const mainCatId = await createCity(guild, 'الرئيسية');
+    await ensureCityRooms(guild, mainCatId);
     const members = await guild.members.fetch();
     let count = 0;
     for (const [, m] of members) {
@@ -256,28 +306,39 @@ client.on('messageCreate', async (message) => {
         await new Promise(r => setTimeout(r, 600));
       }
     }
-    await status.edit(`> ✅ تم بناء السيرفر!\n> 🏠 تم إنشاء **${count}** بيت\n> 🌆 رومات المدينة جاهزة`);
+    await status.edit(`> ✅ تم بناء السيرفر!\n> 🏠 تم إنشاء **${count}** بيت\n> 🌆 المدينة الرئيسية جاهزة`);
     return;
   }
 
-  // ==================== !انتقال ====================
-  if (cmd === '!انتقال') {
-    await ensureCityRooms(guild);
-    await transitToCity(message, userId, CAT_CITY_ID);
+  // ==================== !انتقال / !مدينة (بدون اسم) ====================
+  if (cmd === '!انتقال' || (cmd === '!مدينة' && args.length === 1)) {
+    const mainCat = cityCategories.get('الرئيسية');
+    if (!mainCat) return message.reply('> ❌ ما في مدينة رئيسية بعد، اطلب من الأدمن `!أبدأ٧٧`');
+    await transitToCity(message, userId, mainCat);
     return;
   }
 
-  // ==================== !مدينة ====================
-  if (cmd === '!مدينة' && args[1] !== 'العصابة') {
-    await ensureCityRooms(guild);
-    await transitToCity(message, userId, CAT_CITY_ID);
+  // ==================== !مدينة اسم_المدينة (انتقال لمدينة معينة) ====================
+  if (cmd === '!مدينة' && args.length > 1) {
+    const cityName = args.slice(1).join(' ');
+    const catId = cityCategories.get(cityName);
+    if (!catId) return message.reply(`> ❌ ما في مدينة اسمها **${cityName}**`);
+    await transitToCity(message, userId, catId);
     return;
   }
 
-  // ==================== !مدينة العصابة ====================
-  if (content.trim() === '!مدينة العصابة') {
-    await ensureCityRooms(guild);
-    await transitToCity(message, userId, CAT_GANG_ID);
+  // ==================== !إنشاء مدينة اسم (للرتب العالية) ====================
+  // مثال: !إنشاء مدينة البلابل
+  if (cmd === '!إنشاء' && args[1] === 'مدينة') {
+    if (!member.roles.cache.has(ROLE_HIGH) && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return message.reply('> ❌ ما عندك صلاحية.');
+    }
+    const cityName = args.slice(2).join(' ');
+    if (!cityName) return message.reply('> ⚠️ الاستخدام: `!إنشاء مدينة اسم_المدينة`');
+    if (cityCategories.has(cityName)) return message.reply(`> ❌ مدينة **${cityName}** موجودة بالفعل.`);
+    const catId = await createCity(guild, cityName);
+    await ensureCityRooms(guild, catId);
+    await message.reply(`> ✅ تم إنشاء مدينة **${cityName}**!\n> يقدر أي شخص ينتقل لها بـ \`!مدينة ${cityName}\``);
     return;
   }
 
@@ -285,22 +346,148 @@ client.on('messageCreate', async (message) => {
   if (cmd === '!بيت') {
     const mentioned = message.mentions.users.first();
     if (mentioned) {
-      // زيارة شخص
       const targetChId = homes.get(mentioned.id);
       if (!targetChId) return message.reply('> ❌ هذا الشخص ما عنده بيت.');
       const targetCh = guild.channels.cache.get(targetChId);
       if (!targetCh) return message.reply('> ❌ ما لقيت البيت.');
-
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`visit_yes_${userId}_${mentioned.id}`).setLabel('✅ نعم').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(`visit_no_${userId}_${mentioned.id}`).setLabel('❌ لا أريد').setStyle(ButtonStyle.Danger),
       );
-      await targetCh.send({ content: `> 🚪 <@${mentioned.id}> هل تريد **<@${userId}>** أن يدخل بيتك؟`, components: [row] });
+      await targetCh.send({
+        content: `> 🚪 <@${mentioned.id}> هل تريد **<@${userId}>** أن يدخل بيتك؟\n> إذا أردت إخراجه لاحقاً اكتب \`!خلاص @${(await guild.members.fetch(userId)).user.username}\``,
+        components: [row]
+      });
       await message.reply('> 📨 تم إرسال طلب الزيارة، انتظر الرد.');
     } else {
-      // عودة للبيت
       await transitToHome(message, userId);
     }
+    return;
+  }
+
+  // ==================== !خلاص @منشن (طرد الزائر من بيتك) ====================
+  if (cmd === '!خلاص') {
+    const myHomeId = homes.get(userId);
+    if (!myHomeId || channel.id !== myHomeId) return message.reply('> ❌ هذا الأمر فقط داخل بيتك.');
+    const target = message.mentions.members.first();
+    if (!target) return message.reply('> ⚠️ الاستخدام: `!خلاص @شخص`');
+    await channel.permissionOverwrites.delete(target.id).catch(() => {});
+    await message.reply(`> 👋 تم إخراج <@${target.id}> من بيتك.`);
+    // يرجع لبيته
+    const targetDelay = getDelay(target.id);
+    await target.send(`> 🚪 تم إخراجك من البيت! جاري إعادتك لبيتك خلال ${Math.round(targetDelay / 1000)} ثانية.`).catch(() => {});
+    setTimeout(async () => {
+      for (const [, catId] of cityCategories) {
+        await hideCity(guild, target.id, catId).catch(() => {});
+      }
+      await showHome(guild, target.id);
+    }, targetDelay);
+    return;
+  }
+
+  // ==================== !مسح (مسح رسائل البيت) ====================
+  if (cmd === '!مسح') {
+    const myHomeId = homes.get(userId);
+    if (!myHomeId || channel.id !== myHomeId) return message.reply('> ❌ هذا الأمر فقط داخل بيتك.');
+    let deleted = 1;
+    let batch;
+    do {
+      batch = await channel.messages.fetch({ limit: 100 });
+      if (batch.size === 0) break;
+      await channel.bulkDelete(batch, true).catch(() => {});
+      deleted += batch.size;
+      await new Promise(r => setTimeout(r, 1000));
+    } while (batch.size >= 2);
+    const notice = await channel.send('> 🧹 تم مسح الرسائل!');
+    setTimeout(() => notice.delete().catch(() => {}), 3000);
+    return;
+  }
+
+  // ==================== !روم ====================
+  if (cmd === '!روم') {
+    if (!member.roles.cache.has(ROLE_BUILDER) && !member.permissions.has(PermissionFlagsBits.Administrator)) {
+      return message.reply('> ❌ ما عندك صلاحية.');
+    }
+
+    // !روم @منشن اسم_الروم → محل في المحلات
+    if (message.mentions.members.size > 0) {
+      const target = message.mentions.members.first();
+      const shopName = args.slice(2).join(' ');
+      if (!shopName) return message.reply('> ⚠️ الاستخدام: `!روم @شخص اسم_المحل`');
+      await ensureBaseCategories(guild);
+
+      const shopCh = await guild.channels.create({
+        name: shopName, type: ChannelType.GuildText, parent: CAT_SHOPS_ID,
+        permissionOverwrites: [
+          { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
+          {
+            id: target.id,
+            allow: [
+              PermissionFlagsBits.ViewChannel,
+              PermissionFlagsBits.SendMessages,
+              PermissionFlagsBits.ManageChannels,
+              PermissionFlagsBits.ManageMessages,
+            ]
+          },
+        ]
+      });
+
+      // من في المدينة حالياً يشوف المحل
+      const allMembers = guild.members.cache.filter(m => !m.user.bot && m.id !== target.id);
+      for (const [, m] of allMembers) {
+        // تحقق إذا هو في مدينة
+        let inCity = false;
+        for (const [, catId] of cityCategories) {
+          const cityRooms = guild.channels.cache.filter(c => c.parentId === catId);
+          for (const [, ch] of cityRooms) {
+            const overwrite = ch.permissionOverwrites.cache.get(m.id);
+            if (overwrite && overwrite.allow.has(PermissionFlagsBits.ViewChannel)) {
+              inCity = true; break;
+            }
+          }
+          if (inCity) break;
+        }
+        if (inCity) {
+          await shopCh.permissionOverwrites.create(m.id, { ViewChannel: true, SendMessages: false }).catch(() => {});
+        }
+      }
+
+      await message.reply(`> ✅ تم إنشاء محل **${shopName}** لـ <@${target.id}>`);
+      await shopCh.send(`> 🏪 مرحباً <@${target.id}>! هذا محلك، تقدر تديره بالكامل.\n> اكتب \`ق\` لقفله و\`ف\` لفتحه.`);
+      return;
+    }
+
+    // !روم اسم_المدينة اسم_الروم → روم في مدينة معينة
+    const cityName = args[1];
+    const roomName = args.slice(2).join(' ');
+    if (!cityName || !roomName) return message.reply('> ⚠️ الاستخدام: `!روم اسم_المدينة اسم_الروم` أو `!روم @شخص اسم_المحل`');
+    const catId = cityCategories.get(cityName);
+    if (!catId) return message.reply(`> ❌ ما في مدينة اسمها **${cityName}**`);
+
+    const newCh = await guild.channels.create({
+      name: roomName, type: ChannelType.GuildText, parent: catId,
+      permissionOverwrites: [
+        { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }
+      ]
+    });
+
+    // من في هذي المدينة حالياً يشوف الروم
+    const allMembers = guild.members.cache.filter(m => !m.user.bot);
+    for (const [, m] of allMembers) {
+      const cityRooms = guild.channels.cache.filter(c => c.parentId === catId);
+      let inThisCity = false;
+      for (const [, ch] of cityRooms) {
+        const overwrite = ch.permissionOverwrites.cache.get(m.id);
+        if (overwrite && overwrite.allow.has(PermissionFlagsBits.ViewChannel)) {
+          inThisCity = true; break;
+        }
+      }
+      if (inThisCity) {
+        await newCh.permissionOverwrites.create(m.id, { ViewChannel: true, SendMessages: true }).catch(() => {});
+      }
+    }
+
+    await message.reply(`> ✅ تم إضافة **${roomName}** لمدينة **${cityName}**`);
     return;
   }
 
@@ -310,24 +497,26 @@ client.on('messageCreate', async (message) => {
     const target = message.mentions.members.first();
     const shopName = args.slice(2).join(' ');
     if (!target || !shopName) return message.reply('> ⚠️ الاستخدام: `!محل @شخص اسم_المحل`');
-    await ensureCategories(guild);
+    await ensureBaseCategories(guild);
 
     const shopCh = await guild.channels.create({
       name: shopName, type: ChannelType.GuildText, parent: CAT_SHOPS_ID,
       permissionOverwrites: [
         { id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] },
-        { id: target.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ManageChannels, PermissionFlagsBits.ManageMessages] },
+        {
+          id: target.id,
+          allow: [
+            PermissionFlagsBits.ViewChannel,
+            PermissionFlagsBits.SendMessages,
+            PermissionFlagsBits.ManageChannels,
+            PermissionFlagsBits.ManageMessages,
+          ]
+        },
       ]
     });
 
-    // كل من في المدينة يشوف المحل
-    const allMembers = guild.members.cache.filter(m => !m.user.bot && m.id !== target.id);
-    for (const [, m] of allMembers) {
-      await shopCh.permissionOverwrites.create(m.id, { ViewChannel: true }).catch(() => {});
-    }
-
     await message.reply(`> ✅ تم إنشاء محل **${shopName}** لـ <@${target.id}>`);
-    await shopCh.send(`> 🏪 مرحباً <@${target.id}>! هذا محلك، تقدر تديره بالكامل.`);
+    await shopCh.send(`> 🏪 مرحباً <@${target.id}>! هذا محلك.\n> اكتب \`ق\` لقفله و\`ف\` لفتحه.`);
     return;
   }
 
@@ -342,19 +531,19 @@ client.on('messageCreate', async (message) => {
     return;
   }
 
-  // ==================== !بيع (رتبة بائع سيارات) ====================
+  // ==================== !بيع ====================
   if (cmd === '!بيع') {
     if (!member.roles.cache.has(ROLE_CARSELLER)) return message.reply('> ❌ ما عندك صلاحية.');
     const target = message.mentions.members.first();
     if (!target) return message.reply('> ⚠️ الاستخدام: `!بيع @شخص`');
     carOwners.add(target.id);
     if (!fuelMap.has(target.id)) fuelMap.set(target.id, { count: 0, max: 25 });
-    await message.reply(`> 🚗 تم بيع السيارة لـ <@${target.id}>!`);
-    await target.send('> 🚗 تهانينا! اشتريت سيارة، تنقّلك صار 10 ثواني.\n> راقب بنزينك! كل 25 انتقال تحتاج تعبئ.').catch(() => {});
+    await message.reply(`> 🚗 تم بيع السيارة لـ <@${target.id}>! تنقله صار 10 ثواني.`);
+    await target.send('> 🚗 تهانينا! اشتريت سيارة، تنقّلك صار 10 ثواني.\n> راقب بنزينك! كل 25 انتقال تعبئ.').catch(() => {});
     return;
   }
 
-  // ==================== !عب (رتبة بنزين) ====================
+  // ==================== !عب ====================
   if (cmd === '!عب') {
     if (!member.roles.cache.has(ROLE_GAS)) return message.reply('> ❌ ما عندك صلاحية.');
     const target = message.mentions.members.first();
@@ -366,34 +555,6 @@ client.on('messageCreate', async (message) => {
     const remaining = fuel.max - fuel.count;
     await message.reply(`> ⛽ تم تعبئة بنزين <@${target.id}>! المتبقي: ${remaining} انتقال`);
     await target.send(`> ⛽ تم تعبئة بنزينك! رصيدك: **${remaining}** انتقال.`).catch(() => {});
-    return;
-  }
-
-  // ==================== !روم (رتبة باني) ====================
-  if (cmd === '!روم') {
-    if (!member.roles.cache.has(ROLE_BUILDER)) return message.reply('> ❌ ما عندك صلاحية.');
-    let parentId, roomName;
-    if (args[1] === 'مدينة' && args[2] === 'العصابة') {
-      parentId = CAT_GANG_ID;
-      roomName = args.slice(3).join(' ');
-    } else if (args[1] === 'مدينة') {
-      parentId = CAT_CITY_ID;
-      roomName = args.slice(2).join(' ');
-    } else {
-      return message.reply('> ⚠️ الاستخدام: `!روم مدينة اسم_الروم` أو `!روم مدينة العصابة اسم_الروم`');
-    }
-    if (!roomName) return message.reply('> ⚠️ اكتب اسم الروم.');
-    await ensureCityRooms(guild);
-
-    const newCh = await guild.channels.create({
-      name: roomName, type: ChannelType.GuildText, parent: parentId,
-      permissionOverwrites: [{ id: guild.roles.everyone.id, deny: [PermissionFlagsBits.ViewChannel] }]
-    });
-    const allMembers = guild.members.cache.filter(m => !m.user.bot);
-    for (const [, m] of allMembers) {
-      await newCh.permissionOverwrites.create(m.id, { ViewChannel: true }).catch(() => {});
-    }
-    await message.reply(`> ✅ تم إضافة **${roomName}** للمدينة`);
     return;
   }
 });
@@ -421,7 +582,7 @@ client.on('interactionCreate', async (interaction) => {
 // ===================== تشغيل البوت =====================
 client.once('ready', () => {
   console.log(`✅ البوت شغال: ${client.user.tag}`);
-  console.log('⏳ السيرفر فاضي - انتظر أمر !أبدأ٧٧ من الأدمن');
+  console.log('⏳ انتظر أمر !أبدأ٧٧ من الأدمن');
 });
 
 client.login(TOKEN);
